@@ -1,3 +1,6 @@
+> [!IMPORTANT]
+> This is a fork to fix authentication for Jellyfin 12.
+
 # Jellynouncer
 
 <div align="center">
