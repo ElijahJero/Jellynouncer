@@ -20,7 +20,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.13+](https://img.shields.io/badge/python-3.13+-blue.svg)](https://www.python.org/downloads/)
 [![React 19](https://img.shields.io/badge/react-19.0-61dafb.svg)](https://react.dev/)
-[![Docker](https://img.shields.io/badge/docker-ready-brightgreen.svg)](https://hub.docker.com/r/markusmcnugen/jellynouncer)
+[![Docker](https://img.shields.io/badge/ghcr-ready-brightgreen.svg)](https://github.com/ElijahJero/Jellynouncer/pkgs/container/jellynouncer)
 [![GitHub Issues](https://img.shields.io/github/issues/MarkusMcNugen/Jellynouncer)](https://github.com/MarkusMcNugen/Jellynouncer/issues)
 [![GitHub Stars](https://img.shields.io/github/stars/MarkusMcNugen/Jellynouncer?style=social)](https://github.com/MarkusMcNugen/Jellynouncer/stargazers)
 [![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://github.com/MarkusMcNugen/Jellynouncer/releases)
@@ -1179,7 +1179,7 @@ version: '3.8'
 
 services:
   jellynouncer:
-    image: markusmcnugen/jellynouncer:latest
+    image: ghcr.io/elijahjero/jellynouncer:latest
     container_name: jellynouncer
     restart: unless-stopped
     ports:
@@ -1266,7 +1266,7 @@ docker run -d \
   -v ./data:/app/data \
   -v ./logs:/app/logs \
   -v ./templates:/app/templates \
-  markusmcnugen/jellynouncer:latest
+  ghcr.io/elijahjero/jellynouncer:latest
 ```
 
 </details>
