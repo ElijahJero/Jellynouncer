@@ -2373,16 +2373,31 @@ async def test_jellyfin_connection(
         
         # Create temporary client with config object
         jellyfin = JellyfinAPI(jellyfin_config)
-        
-        # Test connection by getting server info
-        server_info = await jellyfin.get_system_info()
-        
+
+        # connect() proves the API key. Public system info is not enough.
+        if not await jellyfin.connect():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Connection failed: Jellyfin rejected MediaBrowser and Emby authentication",
+            )
+
+        server_info = await jellyfin.get_system_info() or {}
+        version = (
+            server_info.get("Version")
+            or server_info.get("version")
+            or server_info.get("ServerVersion")
+            or "Unknown"
+        )
+
         return {
             "success": True,
             "message": "Connection successful",
             "server_name": server_info.get("ServerName", "Unknown"),
-            "version": server_info.get("Version", "Unknown")
+            "version": version,
+            "auth_mode": jellyfin.auth_mode,
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Jellyfin test failed: {e}")
         raise HTTPException(

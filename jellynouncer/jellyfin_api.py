@@ -22,6 +22,8 @@ License: MIT
 import asyncio
 import time
 import ssl
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 import logging
 from typing import Dict, Any, Optional, List, Callable, Union, Tuple, AsyncGenerator
@@ -137,6 +139,9 @@ class JellyfinAPI:
         self.config = config
         self.logger = get_logger("jellynouncer.jellyfin")
         self.client = None
+        # "mediabrowser" is the Jellyfin 12 Authorization scheme. "emby" is the
+        # legacy header scheme, used only when the server rejects MediaBrowser.
+        self.auth_mode: Optional[str] = None
 
         # Cache for server information with TTL
         self._cached_server_info = None
@@ -151,6 +156,112 @@ class JellyfinAPI:
 
         self.logger.info(f"Jellyfin API client initialized for {config.server_url}")
 
+    def _auth_parameter_line(self) -> str:
+        """Build the MediaBrowser parameter list shared by both auth schemes.
+
+        Parameter order matches jellyfin-apiclient-python so the probe header
+        is the same header the library sends after a successful MediaBrowser probe.
+        """
+        params = {
+            "Client": self.config.client_name,
+            "Device": self.config.device_name,
+            "DeviceId": self.config.device_id,
+            "Version": self.config.client_version,
+            "Token": self.config.api_key,
+        }
+        return ", ".join(f'{key}="{value}"' for key, value in params.items())
+
+    def _mediabrowser_headers(self) -> Dict[str, str]:
+        """Jellyfin 12 authorization. Legacy Emby headers are not included."""
+        return {
+            "Accept": "application/json",
+            "Authorization": f"MediaBrowser {self._auth_parameter_line()}",
+        }
+
+    def _emby_headers(self) -> Dict[str, str]:
+        """Legacy Emby authorization. No Authorization header is sent."""
+        return {
+            "Accept": "application/json",
+            "X-Emby-Token": self.config.api_key,
+            "X-Emby-Authorization": f"MediaBrowser {self._auth_parameter_line()}",
+        }
+
+    def _probe_auth(self, headers: Dict[str, str]) -> int:
+        """Return the HTTP status of an authenticated System/Info request.
+
+        Transport failures propagate so connect() can retry. HTTP responses,
+        including 401, are returned as status codes.
+        """
+        url = f"{self.config.server_url.rstrip('/')}/System/Info"
+        request = urllib.request.Request(url, headers=headers, method="GET")
+        verify = bool(self.client.config.data.get("auth.ssl", False))
+        context = ssl.create_default_context()
+        if not verify:
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+
+        try:
+            with urllib.request.urlopen(request, timeout=30, context=context) as response:
+                return response.status
+        except urllib.error.HTTPError as exc:
+            try:
+                return exc.code
+            finally:
+                exc.close()
+
+    def _apply_emby_auth_headers(self) -> None:
+        """Send legacy Emby headers on every later library request."""
+        http = self.client.http
+        parameter_line = self._auth_parameter_line()
+        token = self.config.api_key
+        app_name = f"{self.config.client_name}/{self.config.client_version}"
+
+        def _get_default_headers(content_type: str = "application/json") -> Dict[str, str]:
+            user_agent = http.config.data.get("http.user_agent") or app_name
+            return {
+                "Accept": "application/json",
+                "Content-type": content_type,
+                "X-Application": app_name,
+                "Accept-Charset": "UTF-8,*",
+                "Accept-encoding": "gzip",
+                "User-Agent": user_agent,
+                "X-Emby-Token": token,
+                "X-Emby-Authorization": f"MediaBrowser {parameter_line}",
+            }
+
+        http._get_default_headers = _get_default_headers
+
+    def _negotiate_auth(self) -> bool:
+        """Choose MediaBrowser auth, falling back to Emby headers on 401.
+
+        Returns False when the server rejects both schemes. Other HTTP
+        statuses are raised so the connection retry loop can run again.
+        """
+        modern_status = self._probe_auth(self._mediabrowser_headers())
+        if modern_status == 200:
+            self.auth_mode = "mediabrowser"
+            self.logger.info("Using Jellyfin MediaBrowser authentication")
+            return True
+
+        if modern_status != 401:
+            raise Exception(f"Jellyfin authentication probe failed with HTTP {modern_status}")
+
+        self.logger.info("MediaBrowser authentication was rejected; trying legacy Emby authentication")
+        emby_status = self._probe_auth(self._emby_headers())
+        if emby_status != 200:
+            self.logger.error(
+                "Jellyfin authentication failed (MediaBrowser HTTP %s, Emby HTTP %s)",
+                modern_status,
+                emby_status,
+            )
+            self.auth_mode = None
+            return False
+
+        self.auth_mode = "emby"
+        self._apply_emby_auth_headers()
+        self.logger.info("Using legacy Emby authentication")
+        return True
+
     async def connect(self) -> bool:
         """
         Establish connection to Jellyfin server with retry logic.
@@ -161,9 +272,12 @@ class JellyfinAPI:
 
         **Connection Process:**
         1. Create Jellyfin client instance
-        2. Configure server URL and authentication
-        3. Verify connection with test API call
-        4. Log connection status and server information
+        2. Configure server URL and client identity
+        3. Authenticate with the Jellyfin 12 MediaBrowser Authorization header
+        4. If that probe returns 401, retry once with legacy Emby headers
+        5. Log connection status and server information
+
+        Public system info is not treated as proof of authentication.
 
         **Retry Strategy:**
         - Exponential backoff: 2s, 4s, 8s between retries
@@ -192,7 +306,13 @@ class JellyfinAPI:
 
                 # Create and configure Jellyfin client
                 self.client = JellyfinClient()
-                self.client.config.app("Jellynouncer", "1.0.0", "jellynouncer", "1.0.0")
+                self.auth_mode = None
+                self.client.config.app(
+                    self.config.client_name,
+                    self.config.client_version,
+                    self.config.device_name,
+                    self.config.device_id,
+                )
 
                 # Auto-enable SSL verification for HTTPS URLs
                 if self.config.server_url.lower().startswith('https://'):
@@ -208,7 +328,10 @@ class JellyfinAPI:
                 self.client.config.data['auth.user_id'] = self.config.user_id
                 self.client.config.data['auth.token'] = self.config.api_key
 
-                # Test connection with system info call
+                if not self._negotiate_auth():
+                    return False
+
+                # Server name and version. Authentication was already proven.
                 system_info = await self.get_system_info()
                 if system_info:
                     # Try different possible field names for version
@@ -221,7 +344,10 @@ class JellyfinAPI:
                         'Unknown'
                     )
 
-                    self.logger.info(f"Connected to Jellyfin server: {server_name} v{server_version}")
+                    self.logger.info(
+                        f"Connected to Jellyfin server: {server_name} v{server_version} "
+                        f"via {self.auth_mode} authentication"
+                    )
                     self.last_connection_check = time.time()
                     return True
                 else:
